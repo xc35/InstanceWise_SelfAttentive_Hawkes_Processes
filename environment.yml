@@ -8,7 +8,7 @@ dependencies:
   - matplotlib
   - scikit-learn
   - pandas
-  - pytorch::pytorch=1.2.0
+  - pytorch::pytorch #=1.2.0
   - joblib
   - cxx-compiler
   - dill
