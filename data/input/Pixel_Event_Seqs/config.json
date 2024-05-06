@@ -1,0 +1,13 @@
+{
+    "dataset": "Pixel_Event_Seqs",
+    "input_path": "data/raw/Pixel_Event_Seqs/parquet",
+    "output_path": "data/input",
+    "n_top_sites": 9,
+    "min_seq_length": 3,
+    "max_seq_length": 100,
+    "time_divisor": 3600.0,
+    "start_date": "2008-08-01",
+    "end_date": "2009-05-01",
+    "n_splits": 1,
+    "rand_seed": 0
+}
