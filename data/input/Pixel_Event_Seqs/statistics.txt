@@ -1,0 +1,2 @@
+n_seqs = 208
+n_types = 9
