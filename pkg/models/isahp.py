@@ -165,28 +165,31 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
 
         self.multiheadattention = MultiHeadedAttention(h=num_head, d_model=hidden_size) #self.d_model
 
+    # v_mu: vectorized background intensity, v_alpha: vectorized kernel/trigger function, v_gamma: vectorized decay rate function
     def state_decay(self, v_mu, v_alpha, v_gamma, dt_arr): # (B, L-1, K), (B, L-1, L-1, K) , (B, L-1, L-1, K), (B, L-1, L-1, 1)
         # * element-wise product
-        cell_t = torch.tanh(v_mu + torch.sum(v_alpha * v_gamma * torch.exp(-v_gamma * dt_arr),-3)) #+ 1e-3
+        cell_t = torch.tanh(v_mu + torch.sum(v_alpha * v_gamma * torch.exp(-v_gamma * dt_arr),-3)) # summation along dim:-3 (time)        ??? #+ 1e-3  ???
         return cell_t # (B, L-1, K)
 
     def forward(
         self, event_seqs, src_mask, onehot=False, target_type=-1
     ):
-
+        # event_seqs is 2D tensor row * event_seq_lenth
         assert event_seqs.size(-1) == 1 + (
             self.n_types if onehot else 1
         ), event_seqs.size()
 
         batch_size, T = event_seqs.size()[:2]
-        self.ts = F.pad(event_seqs[:, :, 0], (1, 0)) #(t+1)
-        dt = self.ts[:, 1:] - self.ts[:, :-1] #(t)
-        temp_feat = dt[:, :-1].unsqueeze(-1) #[64, 336, 1] t-1
+        # torch.nn.functional as F
+        self.ts = F.pad(event_seqs[:, :, 0], (1, 0)) # adding 1 "extra" value (default:0) at the start(i.e. pad_left) of every first element from the third dimension #(t+1)
+        dt = self.ts[:, 1:] - self.ts[:, :-1] # consecutive time intervals (excluding the first (t=0) minus excluding the last (t=t)) #(t)
+        temp_feat = dt[:, :-1].unsqueeze(-1) # the last time interval from t-1 to t is not included in temp_feat #[64, 336, 1] t-1
 
         if onehot:
-            type_feat = self.embed(event_seqs[:, :-1, 1:])
+            type_feat = self.embed(event_seqs[:, :-1, 1:]) # excluding the last element of the second dimension and excluding the first element from the third dimension for the entire tensor
         else:
             type_feat = self.embed(
+                # torch.nn.functional as F
                 F.one_hot(event_seqs[:, :-1, 1].long(), self.n_types).float()
             )
 
@@ -195,6 +198,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
 
         return v_mu, v_alpha, v_gamma
 
+    #Note this function calculate 'negative' log-likelihood , which is (-1) * likelihood function. So the objective is to minimize.
     def _eval_nll(
         self, event_seqs, src_mask, mask, v_mu, v_alpha, v_gamma, device=None, n_mc_samples = 20
     ):  
@@ -206,14 +210,14 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
         torch.set_printoptions(threshold=10000,edgeitems=100)
         dt_meta = torch.tril(torch.repeat_interleave(torch.unsqueeze(dt_seq,-1),n_times,-1)).masked_fill(src_mask == 0., 0.) #(B, L-1, L-1)
         dt_offset = (dt_arr - dt_meta).masked_fill(src_mask == 0., 0.)
-        type_mask = F.one_hot(event_seqs[:, 1:, 1].long(), self.n_types).float()
+        type_mask = F.one_hot(event_seqs[:, 1:, 1].long(), self.n_types).float() #The event types are one-hot encoded
 
 
-        
+        # log likelihood in terms of intensity function
         cell_t = self.state_decay(v_mu, v_alpha, v_gamma, dt_arr[:,:,:,None]) #(B, L-1, K)
         log_intensities = cell_t.log()  # log intensities
         log_sum = (log_intensities * type_mask).sum(-1).masked_select(mask).sum() #B x L-1 -> B
-
+        #The likelihood that no event occurs during the internval ( introduce random time point during interval and
         taus = torch.rand(n_batch, n_times, n_times, 1, n_mc_samples).to(device)# self.process_dim replaced 1 (B,L-1,L-1,1,20)
         taus = dt_meta[:, :, :, None, None] * taus  # inter-event times samples) (B,L-1,L-1,1,20).
         taus =  taus + dt_offset[:,:,:,None,None] #(B,L-1,L-1,1,20).
@@ -229,7 +233,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
         partial_integrals = partial_integrals.masked_select(mask) #average samples (B,L-1)
 
         integral_ = partial_integrals.sum() #B
-
+        # For the within interval random time point non-event likelihood, the original minus(-) becomes plus (+) , due to the function is 'negative' log-likelihood
         res = torch.sum(- log_sum + integral_)/n_batch
         log_sum = torch.sum(- log_sum)/n_batch
         integral = torch.sum(integral_)/n_batch
@@ -267,7 +271,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
             type_reg_mask = torch.repeat_interleave((reg_src_mask * reg_type_mask).unsqueeze(-2),self.n_types,-2)
 
             v_mu, v_alpha, v_gamma = self.forward(
-                batch, masked_seq_types.src_mask
+                batch, masked_seq_types.src_mask  # onehot=False
             )
 
             nll, integral, log_sum = self._eval_nll(batch, masked_seq_types.src_mask,
@@ -307,7 +311,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
             else:
                 l1_reg = 0.0
 
-            loss = nll + type_reg + l1_reg
+            loss = nll + type_reg + l1_reg # All of them are to be minimized, final loss function to be minimized
 
             optim.zero_grad()
             loss.backward()
