@@ -21,8 +21,8 @@ import math
 
 def subsequent_mask(size):
     "mask out subsequent positions"
-    atten_shape = (1,size,size)
-    mask = np.triu(np.ones(atten_shape),k=1).astype('uint8')
+    atten_shape = (1,size,size) #note the shape indicates self-to-self pairing (causal masking)
+    mask = np.triu(np.ones(atten_shape),k=1).astype('uint8') #Upper triangle of an array.
     aaa = torch.from_numpy(mask) == 0
     return aaa
 
@@ -31,12 +31,13 @@ class MaskBatch():
     "object for holding a batch of data with mask during training"
     def __init__(self,src,pad, device):
         self.src = src
-        self.src_mask = self.make_std_mask(self.src, pad, device)
+        self.src_mask = self.make_std_mask(self.src, pad, device) #pad=0.
 
     @staticmethod
     def make_std_mask(tgt,pad,device):
         "create a mask to hide padding and future input"
-        tgt_mask = (tgt != pad).unsqueeze(-2)
+        tgt_mask = (tgt != pad).unsqueeze(-2) #pad=0.
+        # torch.transpose(tgt_mask,1,2) is transposing the tgt_mask matrix which essentially swaps the last two dimensions.
         tgt_mask = tgt_mask & torch.transpose(tgt_mask,1,2) & Variable(subsequent_mask(tgt.size(-1)).type_as(tgt_mask.data)).to(device)
         return tgt_mask
 
@@ -89,6 +90,8 @@ class Attention(nn.Module):
 class MultiHeadedAttention(nn.Module):
     """
     Take in models size and number of heads.
+    h: number of heads
+    d : (1 (time_diff) + type_embedding_dim) * h
     """
 
     def __init__(self, h, d_model, dropout=0.):
@@ -102,7 +105,7 @@ class MultiHeadedAttention(nn.Module):
 
         self.linear_layers = nn.ModuleList([nn.Linear(d_model, d_model, bias=True) for _ in range(3)])
 
-        self.output_alpha = nn.Linear(d_model, d_model, bias=True)
+        self.output_alpha = nn.Linear(d_model, d_model, bias=True) # output_alpha never used ??
 
         self.alpha_layer = nn.Sequential(
             nn.Linear(int(self.d_k*self.h/2), self.d_k, bias=True)
@@ -172,7 +175,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
         return cell_t # (B, L-1, K)
 
     def forward(
-        self, event_seqs, src_mask, onehot=False, target_type=-1
+        self, event_seqs, src_mask, onehot=True #False, target_type=-1
     ):
         # event_seqs is 2D tensor row * event_seq_lenth
         assert event_seqs.size(-1) == 1 + (
@@ -193,7 +196,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
                 F.one_hot(event_seqs[:, :-1, 1].long(), self.n_types).float()
             )
 
-        feat = torch.cat([temp_feat, type_feat], dim=-1) #[64, 336, 20]
+        feat = torch.cat([temp_feat, type_feat], dim=-1) #B (batch_size) = 64, L (max_length), K number of types #[64, 336, 20]
         v_mu, v_alpha, v_gamma = self.multiheadattention.forward(feat,feat,feat, mask=src_mask) #
 
         return v_mu, v_alpha, v_gamma
@@ -210,12 +213,14 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
         torch.set_printoptions(threshold=10000,edgeitems=100)
         dt_meta = torch.tril(torch.repeat_interleave(torch.unsqueeze(dt_seq,-1),n_times,-1)).masked_fill(src_mask == 0., 0.) #(B, L-1, L-1)
         dt_offset = (dt_arr - dt_meta).masked_fill(src_mask == 0., 0.)
+        #Each event in an event sequence is represented as [time, type]. The offset for type is 1.
         type_mask = F.one_hot(event_seqs[:, 1:, 1].long(), self.n_types).float() #The event types are one-hot encoded
 
 
         # log likelihood in terms of intensity function
         cell_t = self.state_decay(v_mu, v_alpha, v_gamma, dt_arr[:,:,:,None]) #(B, L-1, K)
         log_intensities = cell_t.log()  # log intensities
+        #FIXME check if the transpose is correct , why q,k,v embedding dimension has to be the same as number_event_types?
         log_sum = (log_intensities * type_mask).sum(-1).masked_select(mask).sum() #B x L-1 -> B
         #The likelihood that no event occurs during the internval ( introduce random time point during interval and
         taus = torch.rand(n_batch, n_times, n_times, 1, n_mc_samples).to(device)# self.process_dim replaced 1 (B,L-1,L-1,1,20)
@@ -261,8 +266,8 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
             if device:
                 batch = batch.to(device)
             seq_length = (batch.abs().sum(-1) > 0).sum(-1)
-            mask = generate_sequence_mask(seq_length)[:,1:] #pad mask
-            masked_seq_types = MaskBatch(batch[:,1:,0], pad=0., device=device)
+            mask = generate_sequence_mask(seq_length)[:,1:] # zero-padding to the max sequence legnth #pad mask
+            masked_seq_types = MaskBatch(batch[:,1:,0], pad=0., device=device) #causal masked sequences
 
             reg_masked_seq_types = MaskBatch(batch[:,1:,0], pad=0., device=device)
             reg_src_mask = reg_masked_seq_types.src_mask.unsqueeze(-1)
