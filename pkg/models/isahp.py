@@ -100,7 +100,7 @@ class MultiHeadedAttention(nn.Module):
 
         # We assume d_v always equals d_k
         self.d_model = d_model
-        self.d_k = d_model // h
+        self.d_k = d_model // h  #d_k appears to be related to K (number of types), why is d_k associated with d_model?
         self.h = h
 
         self.linear_layers = nn.ModuleList([nn.Linear(d_model, d_model, bias=True) for _ in range(3)])
@@ -175,7 +175,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
         return cell_t # (B, L-1, K)
 
     def forward(
-        self, event_seqs, src_mask, onehot=True #False, target_type=-1
+        self, event_seqs, src_mask, onehot=False, target_type=-1
     ):
         # event_seqs is 2D tensor row * event_seq_lenth
         assert event_seqs.size(-1) == 1 + (
