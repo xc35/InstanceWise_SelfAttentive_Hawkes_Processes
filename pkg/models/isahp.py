@@ -76,16 +76,16 @@ class Attention(nn.Module):
     def forward(self, query, key, value, mask=None, dropout=None):
 
         scores = torch.matmul(query, key.transpose(-2, -1)) \
-                 / math.sqrt(query.size(-1))
+                 / math.sqrt(query.size(-1)) #Since both query and key are rank-4 tensor batch_size * num_heads * seq_len * d_k, dot prodct torch.matmul(query, key.transpose(-2, -1)) is batch_size * num_heads * seq_len * seq_len
 
         if mask is not None:
             scores = scores.masked_fill(mask == 0., -1e9)
-
-        p_attn = F.softmax(scores, dim=-1)
+        #Softmax (scaled) attention scores, along the last dimension (of the attention matrix, in which first dimension is current token, second dimension is the token prior the current token), which becomes attention probability.
+        p_attn = F.softmax(scores, dim=-1) #along the seq_len dimension
         if mask is not None:
-            p_attn = p_attn.masked_fill(mask == 0., 0.)
-
-        return torch.matmul(p_attn, value), p_attn
+            p_attn = p_attn.masked_fill(mask == 0., 0.) # same as scores, p_attn is a rank-4 tensor batch_size*number_heads*seq_len*seq_len
+        #The matrix multiplocation of Query to the scaled dot-product attention scores of past tokens: Q @ softmax( K . V )
+        return torch.matmul(p_attn, value), p_attn #torch.matmul(p_attn, value) results in rank-4 tensor batch_size * number_heads * seq_len * d_k
 
 class MultiHeadedAttention(nn.Module):
     """
@@ -106,7 +106,7 @@ class MultiHeadedAttention(nn.Module):
         self.linear_layers = nn.ModuleList([nn.Linear(d_model, d_model, bias=True) for _ in range(3)])
 
         self.output_alpha = nn.Linear(d_model, d_model, bias=True) # output_alpha never used ??
-
+        #As the name suggests d_k is number of types (K) , which is the out_features of alpha_layer, gamma_layer, mu_layer
         self.alpha_layer = nn.Sequential(
             nn.Linear(int(self.d_k*self.h/2), self.d_k, bias=True)
             ,nn.Softplus(beta=1.0)
@@ -119,7 +119,7 @@ class MultiHeadedAttention(nn.Module):
 
         self.mu_layer = nn.Sequential(
             nn.Linear(self.d_model, self.d_k, bias=True)
-            , nn.Sigmoid()
+            , nn.Sigmoid() #linear that aggregate among heads to the K-dimensional output, followed by a Sigmoid, turned it to probability.
         )
 
         self.attention = Attention()
@@ -131,20 +131,26 @@ class MultiHeadedAttention(nn.Module):
             mask = mask.unsqueeze(1)
 
         batch_size, T = query.size()[:2]
-
+        # q, k ,v each passes through nn.Linear(d_model, d_model, bias=True) before scaled dot-product attention
+        # l(x).view(batch_size, -1, self.h, self.d_k).transpose(1, 2) turns rank 3 batch_size * seq_len * d_model into rannk 4 batch_size * self.h * -1 * self.d_k
         query, key, value = [l(x).view(batch_size, -1, self.h, self.d_k).transpose(1, 2)
                              for l, x in zip(self.linear_layers, (query, key, value))]
+        #Note the value of mu is computed in a multi-head manner : Q @ softmax(K.V)
         v_mu, attn = self.attention.forward(query, key, value, mask=mask, dropout=self.dropout)
+        #Note the attention is repeated for d_k times along the (newly created) last dimension for output (K types?)
         attn_repeat = torch.repeat_interleave(attn.unsqueeze(-1),self.d_k, -1)
+        # T is query size (number of tokens?)
         value_repeat = torch.repeat_interleave(value.unsqueeze(2),T,2)
 
         mask = mask.permute((0, 2, 3, 1))
-
+        #Note the values of alpha and gamma are computed in an unconventiaonal way, by splitting heads - alpha [:int(self.h/2]  , gamma [int(self.h/2):]
         v_alpha = self.alpha_layer((attn_repeat[:,:int(self.h/2)]*value_repeat[:,:int(self.h/2)]).contiguous().view(batch_size, T, T, -1))# (B x L x L x K)
         v_alpha = v_alpha.masked_fill(mask == 0., 0.)
         v_gamma = self.gamma_layer((attn_repeat[:,int(self.h/2):]*value_repeat[:,int(self.h/2):]).contiguous().view(batch_size, T, T, -1))# (B x L x L x K) 0.1
         v_gamma = v_gamma.masked_fill(mask == 0., 0.)
-        v_mu = self.mu_layer(v_mu.transpose(1, 2).contiguous().view(batch_size, -1, self.h * self.d_k))
+        # v_mu.transpose(1, 2) swaps dimensions 1,2 , turns batch_size * number_heads * seq_len * d_k into batch_size * seq_len * number_heads * d_k , view(batch_size, -1, self.h * self.d_k) further reshape it to batch_size * seq_len * d_model
+        v_mu = self.mu_layer(v_mu.transpose(1, 2).contiguous().view(batch_size, -1, self.h * self.d_k)) # view() changes the shape of the tensor without changing data
+        #mu_layer contains a linear layer that aggragated over heads and a sigmoid() to output probability
 
         return v_mu, v_alpha, v_gamma
 
@@ -155,7 +161,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
         embedding_dim: int = 59, #32,
         hidden_size: int = 60, #32,
         dropout: float = 0.0,
-        num_head: int = 6,
+        num_head: int = 6, # For K types of events, we use multi-head attention with K different heads.
         **kwargs,
     ):
         super().__init__()
@@ -196,7 +202,8 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
                 F.one_hot(event_seqs[:, :-1, 1].long(), self.n_types).float()
             )
 
-        feat = torch.cat([temp_feat, type_feat], dim=-1) #B (batch_size) = 64, L (max_length), K number of types #[64, 336, 20]
+        feat = torch.cat([temp_feat, type_feat], dim=-1) #B (batch_size) = 64, L (max_length), embedding_dim + 1  #[64, 336, 20]
+        #Should be noted that embedding_dim + 1 = number_of_heads * d_k, in which d_k is number of types. The concept of heads is not implemented explicitly.
         v_mu, v_alpha, v_gamma = self.multiheadattention.forward(feat,feat,feat, mask=src_mask) #
 
         return v_mu, v_alpha, v_gamma
