@@ -166,7 +166,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
     ):
         super().__init__()
         self.n_types = n_types
-
+        #Note that there is no positional encoding, instead, a linear projective transform is used.
         self.embed = nn.Linear(n_types, embedding_dim, bias=False)
         self.dropout = nn.Dropout(p=dropout)
         self.m_dt = nn.ReLU()
@@ -222,7 +222,6 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
         dt_offset = (dt_arr - dt_meta).masked_fill(src_mask == 0., 0.)
         #Each event in an event sequence is represented as [time, type]. The offset for type is 1.
         type_mask = F.one_hot(event_seqs[:, 1:, 1].long(), self.n_types).float() #The event types are one-hot encoded
-
 
         # log likelihood in terms of intensity function
         cell_t = self.state_decay(v_mu, v_alpha, v_gamma, dt_arr[:,:,:,None]) #(B, L-1, K)
@@ -281,7 +280,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
             reg_type_mask = F.one_hot(batch[:, :-1, 1].long(), self.n_types).bool().unsqueeze(1)
             torch.set_printoptions(threshold=10000,edgeitems=100)
             type_reg_mask = torch.repeat_interleave((reg_src_mask * reg_type_mask).unsqueeze(-2),self.n_types,-2)
-
+            #Note that the function forward() returns v_mu, v_alpha, v_gamma
             v_mu, v_alpha, v_gamma = self.forward(
                 batch, masked_seq_types.src_mask  # onehot=False
             )
@@ -326,7 +325,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
             loss = nll + type_reg + l1_reg # All of them are to be minimized, final loss function to be minimized
 
             optim.zero_grad()
-            loss.backward()
+            loss.backward() #Back-propagation of loss
             torch.nn.utils.clip_grad_norm_(self.parameters(), 5) #self.max_grad_norm
             optim.step()
 
@@ -379,6 +378,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
         type_counts = torch.zeros(self.n_types, self.n_types)
         self.eval()
         with torch.no_grad():
+            # tqdm data loader will show the progress bar 0% --- 100%
             for batch in tqdm(dataloader):
                 if device:
                     batch = batch.to(device)
@@ -402,7 +402,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
                 v_score = v_score.permute((0, 2, 1, 3)) #b,l_j,l_i,k
                 v_score = torch.matmul(v_score, type_mask_i_repeat) #b,l_j,l_i,l_i
                 v_score_instance = v_score.diagonal(offset=0, dim1=2, dim2=3) #b,l_j,l_i
-
+                #Returns the upper triangular part of a matrix (2-D tensor) with torch.triu()
                 count_type = torch.triu(torch.ones(v_score_instance.shape)) #b,l_j,l_i
 
                 v_score_agg_i = torch.matmul(v_score_instance, type_mask_i).permute((0, 2, 1)) #b,k_i,l_j
@@ -442,7 +442,7 @@ class InstancewiseSelfAttentiveHawkesProcesses(nn.Module):
                 dt_seq = torch.diagonal(dt_arr, offset=0, dim1=1, dim2=2) #(B, L-1)
                 dt_meta = torch.tril(torch.repeat_interleave(torch.unsqueeze(dt_seq,-1),n_times,-1)).masked_fill(src_mask == 0., 0.) #(B, L-1, L-1)
                 dt_offset = (dt_arr - dt_meta).masked_fill(src_mask == 0., 0.)
-
+                # Why using dt_arr (time elapsed since t_0) directly , rather than using time offset (t - t_j) ?
                 intensities = self.state_decay(v_mu, v_alpha, v_gamma, dt_arr[:,:,:,None]) #(B, L-1, K)
 
                 k_pred = intensities.argmax(-1).masked_select(mask).cpu().numpy()
